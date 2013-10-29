@@ -5,6 +5,9 @@
  * Custom University of Manitoba hacks for Islandora.
  */
 
+// Includes functions for blocks.
+require_once dirname(__FILE__) . '/includes/blocks.inc';
+
 /**
  * API call to insert a link to a printer friendly version of something.
  *
@@ -12,7 +15,7 @@
  *   path to page we want a printer friendly version of
  */
 function manidora_print_insert_link($path) {
-  return l(t("Printer Friendly Version"), $path);
+  return l(t("Printer Friendly Version"), $path . '/print', array('attributes'=>array('class'=>array('print-link'),'id'=>'clip')));
 }
 
 /**
@@ -78,7 +81,7 @@ function manidora_preprocess_print(&$variables) {
 function manidora_menu() {
   $items = array();
   $items['islandora/object/%islandora_object/manitoba_metadata'] = array(
-    'title' => 'Metadata',
+    'title' => 'Details',
     'type' => MENU_LOCAL_TASK,
     'page callback' => 'manidora_retrieve_metadata_form',
     'page arguments' => array(2),
@@ -100,9 +103,15 @@ function manidora_menu() {
     'type' => MENU_CALLBACK,
     'page callback' => 'drupal_get_form',
     'page arguments' => array('manidora_newspaper_search_form'),
-    'access arguments' => array(FEDORA_VIEW_OBJECTS),
+    'access arguments' => array(ISLANDORA_VIEW_OBJECTS),
   );
   $items['admin/islandora/manidora'] = array(
+    'title' => t('Manidora'),
+    'description' => t('Configure the UofM customization module!'),
+    'access arguments' => array('administer site configuration'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+  $items['admin/islandora/manidora/settings'] = array(
     'title' => 'Manidora',
     'description' => 'Configure the UofM customization module.',
     'page callback' => 'drupal_get_form',
@@ -114,14 +123,14 @@ function manidora_menu() {
     'type' => MENU_CALLBACK,
     'page callback' => 'manidora_printable_pdf',
     'page arguments' => array(4, NULL),
-    'access arguments' => array(FEDORA_VIEW_OBJECTS),
+    'access arguments' => array(ISLANDORA_VIEW_OBJECTS),
   );
   $items['islandora/object/%islandora_object/manidora_download_clip'] = array(
     'page callback' => 'manidora_download_clip',
     'page arguments' => array(2),
     'type' => MENU_CALLBACK,
     'access callback' => 'islandora_object_access_callback',
-    'access arguments' => array(FEDORA_VIEW_OBJECTS, 2),
+    'access arguments' => array(ISLANDORA_VIEW_OBJECTS, 2),
     'load arguments' => array(2),
   );
   $items['islandora/object/%islandora_object/manidora_download_clip_pdf'] = array(
@@ -129,10 +138,25 @@ function manidora_menu() {
     'page arguments' => array(2),
     'type' => MENU_CALLBACK,
     'access callback' => 'islandora_object_access_callback',
-    'access arguments' => array(FEDORA_VIEW_OBJECTS, 2),
+    'access arguments' => array(ISLANDORA_VIEW_OBJECTS, 2),
     'load arguments' => array(2),
   );
-
+  $items['admin/islandora/manidora/homepage'] = array(
+    'title' => t('Manidora Homepage images'),
+    'description' => t('Configure the selected homepage thumbnails.'),
+    'page callback' => 'drupal_get_form',
+    'access arguments' => array('administer site configuration'),
+    'page arguments' => array('manidora_homepage_thumbnail_admin'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+  $items['admin/islandora/manidora/homepage/%/remove'] = array(
+    'title' => t('Manidora Homepage images - removal PID path'),
+    'page callback' => 'manidora_homepage_thumbnail_remove',
+    'page arguments' => array(4),
+    'type'=> MENU_CALLBACK,
+    'access arguments' => array('administer site configuration'),
+  );
+  
   return $items;
 }
 
@@ -155,16 +179,24 @@ function manidora_menu_alter(&$items) {
 /**
  * Fetches MODS metadata as form encoded markup.
  *
- * @param IslandoraObject $object
+ * @param AbstractObject $object
  *   The object you wish to retrive formatted metadata from
  */
-function manidora_retrieve_metadata_form($object) {
-  drupal_set_title(t("@label Metadata", array('@label' => $object->label)));
+function manidora_retrieve_metadata_form(AbstractObject $object) {
+  drupal_set_title($object->label . " Metadata");
   module_load_include('inc', 'islandora', 'includes/breadcrumb');
   drupal_set_breadcrumb(islandora_get_breadcrumbs($object));
-  $output = manidora_mods_transform($object);
-
-  if ($output) {
+  $output = '';
+  $form = array();
+  // Video and audio objects get PBCORE.
+  if (array_intersect(array('islandora:sp_videoCModel', 'islandora:sp-audioCModel'), $object->models) && isset($object['PBCORE'])) {
+    $output = manidora_pbcore_metadata($object);
+  }
+  // Grab MODS otherwise.
+  else {
+    $output = manidora_mods_transform($object);
+  }
+  if (!empty($output)) {
     $form = array(
       '#type' => 'item',
       '#markup' => $output,
@@ -174,15 +206,24 @@ function manidora_retrieve_metadata_form($object) {
   else {
     drupal_set_message(t('A transformation error has occured!'), 'error');
   }
-  return $form;
+  return $form;  
 }
 
 /**
  * Implements hook_access().
  */
-function manidora_metadata_access($object) {
-  if (!in_array('islandora:collectionCModel', $object->models) && $object['MODS']) {
-    return TRUE;
+function manidora_metadata_access(AbstractObject $object) {
+  if (!in_array('islandora:collectionCModel', $object->models)) {
+    if (array_intersect(array('islandora:sp_videoCModel', 'islandora:sp-audioCModel'), $object->models)) {
+      if (isset($object['PBCORE']) || isset($object['MODS'])) {
+        return TRUE;
+      }
+    }
+    else {
+      if (isset($object['MODS'])) {
+        return TRUE;
+      }
+    }
   }
   return FALSE;
 }
@@ -226,170 +267,218 @@ function manidora_download_access($object) {
  * @param IslandoraObject $object
  *   The IslandoraObject whose MODS metadata you wish to transform.
  */
-function manidora_mods_transform($object) {
-  $mods_text = $object->repository->api->a->getDatastreamDissemination($object->id, 'MODS');
+ function manidora_mods_transform($object) {
+   module_load_include('inc', 'islandora', 'includes/utilities'); // To get the islandora functions
 
-  if ($mods_text) {
-    if (in_array('islandora:bookCModel', $object->models)) {
-      $rows = array();
-      $mods_xml = new SimpleXMLElement($mods_text);
+   $mods_text = $object->repository->api->a->getDatastreamDissemination($object->id, 'MODS');
+   $parent_collections = islandora_get_parents_from_rels_ext($object);
 
-      $mods_xml->registerXPathNamespace('mods', 'http://www.loc.gov/mods/v3');
+   if ($parent_collections){
+     $collections = "";
+     foreach ($parent_collections as $c){
+       $collections .= l($c->label,'islandora/objects/'.$c->id) . "<br />";
+     }
+   }
 
-      // Title info.
-      $title_results = $mods_xml->xpath('/mods:mods/mods:titleInfo/mods:title');
-      $title = (string) reset($title_results);
+   if ($mods_text) {
+     if (in_array('islandora:bookCModel', $object->models)) {
+       $rows = array();
+       $mods_xml = new SimpleXMLElement($mods_text);
 
-      if (!empty($title)) {
-        $rows[] = array('Field' => t('Title'), 'Value' => $title);
-      }
+       $mods_xml->registerXPathNamespace('mods', 'http://www.loc.gov/mods/v3');
 
-      $subtitle_results = $mods_xml->xpath('/mods:mods/mods:titleInfo/mods:subTitle');
-      $subtitle = (string) reset($subtitle_results);
+       // Title info.
+       $title_results = $mods_xml->xpath('/mods:mods/mods:titleInfo/mods:title');
+       $title = (string) reset($title_results);
 
-      if (!empty($subtitle)) {
-        $rows[] = array(t('Subtitle'), $subtitle);
-      }
+       if (!empty($title)) {
+         $rows[] = array('Field' => t('Title'), 'Value' => $title);
+       }
 
-      $authors = array();
+       if (!empty($collections)){
+         $rows[] = array(t('Collections'),$collections);
+       }
 
-      // Authors.
-      foreach ($mods_xml->name as $name_xml) {
-        $name_parts = array();
-        $role = (string) @$name_xml->role->roleTerm;
-        if ($role) {
-          if ($role == 'author') {
-            foreach ($name_xml->namePart as $name_part) {
-              if ((string) $name_part != '') {
-                // Strip periods off the end.
-                $np = (string) rtrim($name_part, '.');
-                if ($name_part['type'] == 'given') {
-                  $name_parts['first_name'] = (string) $name_part;
-                }
-                if ($name_part['type'] == 'family') {
-                  $name_parts['last_name'] = $np;
-                }
-              }
-            }
-          }
-          if (isset($names_parts['last_name']) && isset($name_parts['first_name'])) {
-            $authors[] = $name_parts['first_name'] . ' ' . $name_parts['last_name'];
-          }
-        }
-      }
-      $author_markup = '';
-      foreach ($authors as $author) {
-        if (empty($author)) {
-          $author_markup = $author;
-        }
-        else {
-          $author_markup .= '<br/>' . $author;
-        }
-      }
+       $description_results = $mods_xml->xpath('/mods:mods/mods:abstract');
+       $description = (string) reset($description_results);
 
-      if (!empty($author_markup)) {
-        $rows[] = array(t('Author'), $author_markup);
-      }
+       if (!empty($description)){
+         $rows[] = array(t('Description'),$description);
+       }
 
-      // Origin Info.
-      $place_results = $mods_xml->xpath('/mods:mods/mods:originInfo/mods:place/mods:placeTerm');
-      $place = (string) reset($place_results);
+       $format_res = $mods_xml->xpath('/mods:mods/mods:typeOfResource');
+       $format = (string) reset($format_res);
+       if (!empty($format)){
+         $rows[] = array(t('Format'),$format);
+       }
 
-      if (!empty($place)) {
-        $rows[] = array(t('Place'), $place);
-      }
+       $date_res = $mods_xml->xpath('/mods:mods/mods:subject/mods:temporal');
+       $date = (string) reset($date_res);
+       if (!empty($date)){
+         $rows[] = array(t('Date'),$date);
+       }
 
-      $publisher_results = $mods_xml->xpath('/mods:mods/mods:originInfo/mods:publisher');
-      $publisher = (string) reset($publisher_results);
+       $subtitle_results = $mods_xml->xpath('/mods:mods/mods:titleInfo/mods:subTitle');
+       $subtitle = (string) reset($subtitle_results);
 
-      if (!empty($publisher)) {
-        $rows[] = array(t('Publisher'), $publisher);
-      }
+       if (!empty($subtitle)) {
+         $rows[] = array(t('Subtitle'), $subtitle);
+       }
 
-      $date_results = $mods_xml->xpath('/mods:mods/mods:originInfo/mods:dateIssued');
-      $date = (string) reset($date_results);
+       $authors = array();
 
-      if (!empty($date)) {
-        $date_format = new DateTime($date);
-        $rows[] = array(t('Date Issued'), date_format($date_format, 'Y-m-d'));
-      }
+       // Authors.
+       foreach ($mods_xml->name as $name_xml) {
+         $name_parts = array();
+         $role = (string) @$name_xml->role->roleTerm;
+         if ($role) {
+           if ($role == 'author') {
+             foreach ($name_xml->namePart as $name_part) {
+               if ((string) $name_part != '') {
+                 // Strip periods off the end.
+                 $np = (string) rtrim($name_part, '.');
+                 if ($name_part['type'] == 'given') {
+                   $name_parts['first_name'] = (string) $name_part;
+                 }
+                 if ($name_part['type'] == 'family') {
+                   $name_parts['last_name'] = $np;
+                 }
+               }
+             }
+           }
+           if (isset($names_parts['last_name']) && isset($name_parts['first_name'])) {
+             $authors[] = $name_parts['first_name'] . ' ' . $name_parts['last_name'];
+           }
+         }
+       }
+       $author_markup = '';
+       foreach ($authors as $author) {
+         if (empty($author)) {
+           $author_markup = $author;
+         }
+         else {
+           $author_markup .= '<br/>' . $author;
+         }
+       }
 
-      // Physical Description.
-      $physical_results = $mods_xml->xpath('/mods:mods/mods:physicalDescription/mods:extent');
-      $physical = (string) reset($physical_results);
+       if (!empty($author_markup)) {
+         $rows[] = array(t('Author'), $author_markup);
+       }
 
-      if (!empty($physical)) {
-        $rows[] = array(t('Physical Description'), $physical);
-      }
+       // Origin Info.
+       $place_results = $mods_xml->xpath('/mods:mods/mods:originInfo/mods:place/mods:placeTerm');
+       $place = (string) reset($place_results);
 
-      // Record Info.
-      $record_id_results = $mods_xml->xpath('/mods:mods/mods:recordInfo/mods:recordIdentifier');
-      $record_id = (string) reset($record_id_results);
+       if (!empty($place)) {
+         $rows[] = array(t('Place'), $place);
+       }
 
-      if (!empty($record_id)) {
-        $rows[] = array(t('Record ID'), $record_id);
-      }
+       $publisher_results = $mods_xml->xpath('/mods:mods/mods:originInfo/mods:publisher');
+       $publisher = (string) reset($publisher_results);
 
-      $content_source_results = $mods_xml->xpath('/mods:mods/mods:recordInfo/mods:recordContentSource');
-      $content_source = (string) reset($content_source_results);
+       if (!empty($publisher)) {
+         $rows[] = array(t('Publisher'), $publisher);
+       }
 
-      if (!empty($content_source)) {
-        $rows[] = array(t('Content Source'), $content_source);
-      }
+       $date_results = $mods_xml->xpath('/mods:mods/mods:originInfo/mods:dateIssued');
+       $date = (string) reset($date_results);
 
-      $language_results = $mods_xml->xpath('/mods:mods/mods:recordInfo/mods:languageofCataloging');
-      $language = (string) reset($language_results);
+       if (!empty($date)) {
+         $date_format = new DateTime($date);
+         $rows[] = array(t('Date Issued'), date_format($date_format, 'Y-m-d'));
+       }
 
-      if (!empty($language)) {
-        $rows[] = array(t('Language'), $language);
-      }
+       // Physical Description.
+       $physical_results = $mods_xml->xpath('/mods:mods/mods:physicalDescription/mods:extent');
+       $physical = (string) reset($physical_results);
 
-      // Identifier.
-      $identifier_results = $mods_xml->xpath('/mods:mods/mods:identifier');
-      $identifier = (string) reset($identifier_results);
+       if (!empty($physical)) {
+         $rows[] = array(t('Physical Description'), $physical);
+       }
 
-      if (!empty($identifier)) {
-        $rows[] = array(t('Identifier'), $identifier);
-      }
+       // Record Info.
+       $record_id_results = $mods_xml->xpath('/mods:mods/mods:recordInfo/mods:recordIdentifier');
+       $record_id = (string) reset($record_id_results);
 
-      // Table markup.
-      $headers = array('Field' => t('Field'), 'Value' => t('Value'));
-      $markup = theme_table(array(
-        'header' => $headers,
-        'rows' => $rows,
-        'attributes' => array(),
-        'caption' => '',
-        'colgroups' => array(),
-        'sticky' => TRUE,
-        'empty' => t('No MODS present!')));
-      return $markup;
-    }
-    else {
-      $xslt_processor = new XSLTProcessor();
-      $xsl = new DOMDocument();
-      $file = drupal_get_path('module', 'manidora') . '/xsl/manidora_mods2html.xsl';
-      $xsl->load($file);
-      $input = new DOMDocument();
+       if (!empty($record_id)) {
+         $rows[] = array(t('Record ID'), $record_id);
+       }
 
-      $did_load = $input->loadXML($mods_text);
+       $content_source_results = $mods_xml->xpath('/mods:mods/mods:recordInfo/mods:recordContentSource');
+       $content_source = (string) reset($content_source_results);
 
-      if ($did_load) {
-        global $base_url;
-        $xslt_processor->importStylesheet($xsl);
-        $xslt_processor->setParameter('', array(
-          'islandoraUrl' => $base_url,
-        ));
-        $mods_transformed = $xslt_processor->transformToXml($input);
-        return $mods_transformed;
-      }
-      else {
-        return FALSE;
-      }
-    }
-  }
-  else {
-    return FALSE;
-  }
+       if (!empty($content_source)) {
+         $rows[] = array(t('Content Source'), $content_source);
+       }
+
+       $language_results = $mods_xml->xpath('/mods:mods/mods:recordInfo/mods:languageofCataloging');
+       $language = (string) reset($language_results);
+
+       if (!empty($language)) {
+         $rows[] = array(t('Language'), $language);
+       }
+
+       // Identifier.
+       $identifier_results = $mods_xml->xpath('/mods:mods/mods:identifier');
+       $identifier = (string) reset($identifier_results);
+
+       if (!empty($identifier)) {
+         $rows[] = array(t('Identifier'), $identifier);
+       }
+
+       // Table markup.
+       $headers = array('Field' => t('Field'), 'Value' => t('Value'));
+       $markup = theme_table(array(
+         'header' => $headers,
+         'rows' => $rows,
+         'attributes' => array(),
+         'caption' => '',
+         'colgroups' => array(),
+         'sticky' => TRUE,
+         'empty' => t('No MODS present!')));
+       return $markup;
+     }
+     else {
+       $xslt_processor = new XSLTProcessor();
+       $xsl = new DOMDocument();
+       $file = drupal_get_path('module', 'manidora') . '/xsl/manidora_mods2html.xsl';
+       $xsl->load($file);
+       $input = new DOMDocument();
+
+       $did_load = $input->loadXML($mods_text);
+
+       if ($did_load) {
+         global $base_url;
+         $xslt_processor->registerPHPFunctions(); // Using PHP functions to inject the collections HTML into the XSL
+         $xslt_processor->importStylesheet($xsl);
+         $param_array = array(
+           'islandoraUrl' => $base_url,
+         );
+         if (isset($collections)){
+           $param_array['collections'] = '<span>'.$collections.'</span>';
+         }
+         $xslt_processor->setParameter('', $param_array);
+         $mods_transformed = $xslt_processor->transformToXml($input);
+         return manidora_print_insert_link('print/islandora/object/'.$object->id."/manitoba_metadata") .$mods_transformed;
+       }
+       else {
+         return FALSE;
+       }
+     }
+   }
+   else {
+     return FALSE;
+   }
+ }
+
+/** 
+ * Used to insert the Collections into the mods2html.xsl stylesheet
+ * This is called from the mods2html.xsl XSLT and passed a string of HTML.
+ */ 
+function manidora_return_collection_nodeset($i){
+  $doc = new DOMDocument;
+  $doc->loadXml($i);
+  return $doc;
 }
 
 /**
@@ -410,7 +499,7 @@ function manidora_download_table($islandora_object) {
   module_load_include('inc', 'islandora', 'includes/breadcrumb');
   drupal_set_breadcrumb(islandora_get_breadcrumbs($islandora_object));
 
-  drupal_set_title(t("@label Downloads", array('@label' => $islandora_object->label)));
+  drupal_set_title($islandora_object->label ." Downloads");
 
   $headers = array(
     'ID' => t('ID'),
@@ -431,7 +520,21 @@ function manidora_download_table($islandora_object) {
       );
     }
   }
-
+  
+  // We want TIFFS, JPEG and PDFs at the top of the Downloads list.
+  $topA = array();
+  $bottomA = array();
+  foreach ($rows as $row){
+    if (preg_match('/>(JPG|PDF|TIFF|OBJ)</',$row['ID'])){
+      array_push($topA,array('data'=>$row, 'class'=>array('important-download')));
+    } else {
+      array_push($bottomA,array('data'=>$row));
+    }
+  }
+  sort($topA);
+  sort($bottomA);
+  $rows = array_merge($topA,$bottomA);
+  
   $table = array(
     '#theme' => 'table',
     '#header' => $headers,
@@ -455,30 +558,194 @@ function manidora_download_table($islandora_object) {
  *   The constructed form
  */
 function manidora_newspaper_search_form($form, &$form_state) {
+  module_load_include('php','islandora_solr','SolrPhpClient/Apache/Solr/Service');
+  $solr_params = array('fl'=>'PID,title_sort_ms');
+  $solr_query = '+RELS_EXT_hasModel_uri_ms:"info:fedora/islandora:newspaperCModel"';
+  
+  $path_parts = parse_url(variable_get('islandora_solr_url', 'localhost:8080/solr')); 
+  #$path_parts = parse_url('digitalcollections.lib.umanitoba.ca:8080/solr');
+  $solr = new Apache_Solr_Service($path_parts['host'], $path_parts['port'], $path_parts['path'] . '/');
+
+  $solr->setCreateDocuments(0);
+  $results = $solr->search($solr_query,0,100,$solr_params);
+  
+  $tmpobjects = array();
+  if ($results){
+    $solr_results = json_decode($results->getRawResponse(), TRUE);
+    $all_years = array();
+    foreach ($solr_results["response"]["docs"] as $key => $doc){
+      if (strlen($doc['title_sort_ms'][0]) > 0){
+        $tmpobjects[$doc['PID']] = $doc['title_sort_ms'][0];
+        $sq = 'RELS_EXT_hasModel_uri_ms:"info:fedora/islandora:newspaperIssueCModel" AND ancestors_ms:"' . $doc['PID'] .'"';
+        $sp = array('facet'=>'true','facet.range'=>'mods_originInfo_dateIssued_dt', 'f.mods_originInfo_dateIssued_dt.facet.range.start'=>'1800-01-01T00:00:00Z', 'f.mods_originInfo_dateIssued_dt.facet.range.end' => 'NOW', 'f.mods_originInfo_dateIssued_dt.facet.range.gap' => '+1YEAR');
+        $years = $solr->search($sq,0,0,$sp); 
+        $year_array = array();
+        if ($years){
+          $year_result = json_decode($years->getRawResponse(),TRUE);
+          foreach ($year_result['facet_counts']['facet_ranges']['mods_originInfo_dateIssued_dt']['counts'] as $date => $count){
+            if ($count > 0){
+              $year_array[] = substr($date,0,4);
+            }
+          }
+          if (count($year_array)>0){
+            sort($year_array);
+            $all_years = array_merge($all_years, $year_array);
+            $tmpobjects[$doc['PID']] .= ' ('.$year_array[0] . '-' . $year_array[count($year_array)-1].')';
+          }
+        }
+      }
+    }
+  }
+  
+  if (isset($all_years) && count($all_years) > 0){
+    sort($all_years);
+    $all_years = array_unique($all_years);
+  }
+
   $form = array(
-    'exact_phrase' => array(
-      '#type' => 'textfield',
-      '#title' => t('With the exact phrase'),
+    'left_column' => array(
+      '#type' => 'container',
+      '#attributes' => array('class'=> array('column-split-50')),
     ),
-    'least_one' => array(
-      '#type' => 'textfield',
-      '#title' => t('With at least one of the words'),
-    ),
-    'without_words' => array(
-      '#type' => 'textfield',
-      '#title' => t('Without all the words'),
-    ),
-    'all_words' => array(
-      '#type' => 'textfield',
-      '#title' => t('With all of the words'),
-    ),
-    'submit' => array(
-      '#type' => 'submit',
-      '#value' => t('Search'),
-      '#submit' => array('manidora_newspaper_search_form_submit'),
+     'mid_column' => array(
+        '#type' => 'container',
+        '#attributes' => array('class'=> array('column-split-25')),
+      ),
+    'right_column' => array(
+      '#type' => 'container',
+      '#attributes' => array('class'=> array('column-split-25')),
     ),
   );
+  
+  $form['left_column']['exact_phrase'] = array(
+    '#type' => 'textfield',
+    '#title' => t('With the exact phrase'),
+    '#size' => 50,
+  );
+  $form['left_column']['least_one'] = array(
+    '#type' => 'textfield',
+    '#title' => t('With at least one of the words'),
+    '#size' => 50,
+  );
+  $form['left_column']['all_words'] = array(
+    '#type' => 'textfield',
+    '#title' => t('With all of the words'),
+    '#size' => 50,
+  );
+  $form['left_column']['without_words'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Without these words'),
+    '#suffix' => '<p class="without-words-suffix">'.t('If you are searching for "Winnipeg football" but want to exclude references to the Winnipeg Blue Bombers in your search results, you would enter the words "Blue Bombers" in this box.') . '</p>',
+    '#size' => 50,
+  );
+  $form['left_column']['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Search'),
+    '#submit' => array('manidora_newspaper_search_form_submit'),
+  );
+
+  $form['mid_column']['titles'] = array(
+    '#type' => 'checkboxes',
+    '#title' => t('Limit to only these titles'),
+    '#options' => $tmpobjects,
+    #'#default_value' => array_keys($tmpobjects),
+  );
+  $form['mid_column']['select_all'] = array(
+    '#type' => 'markup',
+    '#markup' => '<span id="manidora-newspaper-search-select-all"><a href="javascript://" onclick="jQuery(\'#edit-titles input:checkbox\').attr(\'checked\',\'checked\');">'.t('Select').'</a>/<a href="javascript://" onclick="jQuery(\'#edit-titles input:checkbox\').removeAttr(\'checked\');">'.t('Deselect').'</a> all titles</span>',
+  );
+  $form['mid_column']['browse'] = array(
+    '#type' => 'markup',
+    '#markup' => '<p>'.l(t('Browse all newspapers'),'islandora/object/uofm:libraries').'</p>',
+  );
+  $form['right_column']['date_text'] = array(
+    '#type' => 'container',
+    '#attributes' => array('class'=> array('date-limiter')),
+    '#prefix' => '<p class="label">'.t('Limit to a date range').'</p>',
+    '#suffix' => '<p>Format (1900/05/23)</p>',
+  );
+  $form['right_column']['date_text']['date_from'] = array(
+    '#type' => 'textfield',
+    '#title' => t('from'),
+    '#size' => 10,
+    '#suffix' => '<span class="date-spacer">'.t('  -  ').'</span>',
+  );
+  $form['right_column']['date_text']['date_to'] = array(
+    '#type' => 'textfield',
+    '#title' => t('to'),
+    '#size' => 10,
+  );
+  if (isset($all_years) && count($all_years) > 0){
+    $form['right_column']['date_range_low'] = array(
+      '#type' => 'hidden',
+      '#value' => $all_years[0],
+    );
+    $form['right_column']['date_range_high'] = array(
+      '#type' => 'hidden',
+      '#value' => $all_years[count($all_years)-1],
+    );
+  }
+  
+  
+  drupal_set_title('Newspaper Search');
+  drupal_set_breadcrumb(array());
+
   return $form;
+}
+
+function manidora_newspaper_search_form_validate($form, &$form_state){
+  if (isset($form_state['values']['date_from']) && !empty($form_state['values']['date_from'])){
+    if (!preg_match('/^([0-9]{4})\/?([0-9]{2})?\/?([0-9]{2})?$/',$form_state['values']['date_from'],$bits)){
+      form_set_error('date_from',t('From date must be of the form "YYYY/MM/DD"'));
+    } else {
+      $from['year'] = $bits[1];
+      $from['iso'] = $bits[1];
+      if (count($bits)>2){
+        $from['month'] = $bits[2];
+        $from['iso'] .= $bits[2];
+      }
+      if (count($bits)>3){
+        $from['day'] = $bits[3];
+        $from['iso'] .= $bits[3];
+      }
+      if (array_key_exists('day',$from) && !checkdate($from['month'],$from['day'],$from['year'])){
+        form_set_error('date_from',t('From date was not valid, please ensure your date is of form "YYYY/MM/DD"'));
+      }
+    }
+  }
+  if (isset($form_state['values']['date_to']) && !empty($form_state['values']['date_to'])){
+    if (!preg_match('/^([0-9]{4})\/?([0-9]{2})?\/?([0-9]{2})?$/',$form_state['values']['date_to'],$bits)){
+      form_set_error('date_to',t('To date must be of the form "YYYY/MM/DD"'));
+    } else {
+      $to['year'] = $bits[1];
+      $to['iso'] = $bits[1];
+      if (count($bits)>2){
+        $to['month'] = $bits[2];
+        $to['iso'] .= $bits[2];
+      }
+      if (count($bits)>3){
+        $to['day'] = $bits[3];
+        $to['iso'] .= $bits[3];
+      }
+      if (array_key_exists('day',$to) && !checkdate($to['month'],$to['day'],$to['year'])){
+        form_set_error('date_to',t('To date was not valid, please ensure your date is of form "YYYY/MM/DD"'));
+      }
+    }
+  }
+  if (isset($from) && isset($to)){
+    if ($from['iso'] > $to['iso']){
+      form_set_error('date_from',t('From date cannot be larger than To date'));
+    }
+  }
+  if (isset($form_state['values']['date_range_low'])){
+    if (isset($from) && $from['year'] > $form_state['values']['date_range_high']){
+      form_set_error('date_from',t('Our newspapers only go up to the year (' . t($form_state['values']['date_range_high']) . '), please adjust your date range.'));
+      
+    }
+    if (isset($to) && $to['year'] < $form_state['values']['date_range_low']){
+      form_set_error('date_to',t('Our newspapers only start at the year (' . t($form_state['values']['date_range_low']) . '), please adjust your date range.'));
+    }
+  }
 }
 
 /**
@@ -493,8 +760,9 @@ function manidora_newspaper_search_form($form, &$form_state) {
  *   Its state
  */
 function manidora_newspaper_search_form_submit($form, &$form_state) {
+  global $_islandora_solr_queryclass;
   $query_string = '';
-
+  $params = isset($_islandora_solr_queryclass->internalSolrParams) ? $_islandora_solr_queryclass->internalSolrParams : array();
   if (strlen($form_state['values']['all_words']) > 0) {
     $all_words = $form_state['values']['all_words'];
     $all_array = explode(' ', $all_words);
@@ -563,11 +831,70 @@ function manidora_newspaper_search_form_submit($form, &$form_state) {
     }
     $query_string .= ')';
   }
+  /* Date limiting */
+  
+  $iso_date = function($date){
+    $date_array = explode('/',$date);
+    if (!isset($date_array[1])){
+      $date_array[1] = '01';
+    }
+    if (!isset($date_array[2])) {
+      $date_array[2] = '01';
+    }
+    return vsprintf('%s-%s-%sT00:00:00Z',$date_array);
+  };
+
+  if (strlen($form_state['values']['date_from']) > 0){
+    $from = $iso_date($form_state['values']['date_from']);
+  }
+    
+  if (strlen($form_state['values']['date_to']) > 0) {
+    $to = $iso_date($form_state['values']['date_to']);
+  } 
+  if (isset($from) || isset($to)){
+    if (!isset($from)){
+      $from = $form_state['values']['date_range_low'] . '-01-01T00:00:00Z';
+    }
+    if (!isset($to)){
+      $to = $form_state['values']['date_range_high'] . '-01-01T00:00:00Z';
+    }
+    $date_limit = 'mods_originInfo_dateIssued_dt:[' . $from . ' TO ' . $to . ']';
+  }
+
+  // Did we select at least 1, but not all newspapers
+  $selected_papers = array();
+  foreach ($form_state['values']['titles'] as $key => $val){
+    if ($key === $val){
+      $selected_papers[] = $key;
+    }
+  }
+  
+  $hidden_filter = array('RELS_EXT_hasModel_uri_ms:("info:fedora/islandora:newspaperPageCModel" "info:fedora/islandora:newspaperCModel" "info:fedora/islandora:newspaperIssueCModel")');
+  if (count($selected_papers) > 0 && count($selected_papers) < count($form_state['values']['titles'])){
+    $hidden_filter = array('ancestors_ms:("'.implode('" "',$selected_papers).'")');
+    #$query['f'] = array('ancestors_ms:("'.implode('" "',$selected_papers).'")'); // To show the facet
+  }
   $query_string = str_replace('/', '~slsh~', $query_string);
-  $query = array(
+/*  $query = array(
     'type' => 'edismax',
-    'hidden_filter' => array('+RELS_EXT_hasModel_uri_ms:("info:fedora/islandora:newspaperPageCModel" "info:fedora/islandora:newspaperCModel" "info:fedora/islandora:newspaperIssueCModel")'),
-  );
+    'hidden_filter' => $hidden_filter,
+  );*/
+  $params['type'] = 'edismax';
+  $params['hidden_filter'] = $hidden_filter;
+  // Set date filter key if there are no date filters included.
+  if (isset($params['f'])) {
+    foreach ($params['f'] as $key => $f) {
+      if (strpos($f, $facet_field) !== FALSE) {
+        array_splice($params['f'], $key);
+      }
+    }
+    $params['f'][] = $date_limit;
+    $query = array_merge_recursive($params);
+  }
+  else {
+    $query = array_merge_recursive($params, array('f' => array($date_limit)));
+  }
+
   drupal_goto('islandora/search/' . $query_string, array(
     'query' => $query,
   ));
@@ -883,7 +1210,9 @@ function manidora_islandora_newspaperPageCModel_islandora_object_ingested($objec
   $args[] = '-quality ' . escapeshellarg('25%');
   $derivative_file = islandora_large_image_imagemagick_convert($uploaded_file, "temporary://{$base_name}_HQ_JPG.jpg", $args);
   if ($derivative_file === FALSE) {
-    drupal_set_message(t('Failed to create HQ_JPG derivative'), 'error');
+    // XXX: Used in newspaper batch...  drupal_set_message('...', 'error') causes the batch to stop, due to
+    // http://api.drush.org/api/drush/includes!drush.inc/function/_drush_log_drupal_messages/6.x
+    drupal_set_message(t('Failed to create HQ_JPG derivative'), 'warning');
     file_unmanaged_delete($uploaded_file);
     return FALSE;
   }
@@ -949,27 +1278,30 @@ function manidora_preprocess_page(&$variables) {
   }
 }
 
+
 /**
  * Implements hook_CMODEL_PID_islandora_view_object_alter().
  *
  * Get rid of the default collection view--we render our desired view with Solr
  * in manidora_islandora_collectioncmodel_islandora_view_object().
  */
+/** ---
 function manidora_islandora_collectioncmodel_islandora_view_object_alter(AbstractObject &$object, &$views) {
   unset($views['Collection View']);
 }
-
+*/
 /**
  * Implements hook_CMODEL_PID_islandora_view_object().
  *
  * Render Solr results for a collection, to be used instead of the default
  * collection display.
  */
+ /** --- 
 function manidora_islandora_collectioncmodel_islandora_view_object(AbstractObject $object) {
   // XXX: Seems counter-intuitive to set into the $_GET parameters, but that's
   // how Solr takes 'em.
   $_GET['f'] = array(
-    format_string('!field_one:"!pid" OR !field_two:"info:fedora/!pid"', array(
+    format_string('!field_one:("info:fedora/!pid" OR "!pid") OR !field_two:("info:fedora/!pid" OR "!pid")', array(
       '!pid' => $object->id,
       '!field_one' => variable_get('manidora_collection_solr_field', 'RELS_EXT_isMemberOfCollection_uri_ms'),
       '!field_two' => variable_get('manidora_secondary_collection_solr_field', 'RELS_EXT_isMemberOf_uri_ms'),
@@ -985,6 +1317,7 @@ function manidora_islandora_collectioncmodel_islandora_view_object(AbstractObjec
 
   return $output;
 }
+*/
 
 /**
  * Implements hook_process_theme().
@@ -992,5 +1325,188 @@ function manidora_islandora_collectioncmodel_islandora_view_object(AbstractObjec
 function manidora_process_islandora_large_image(&$variables) {
   // Override the default text for UofM.
   $islandora_object = $variables['islandora_object'];
-  $variables['image_clip'] = l(t('Printer Friendly Version'), "islandora/object/{$islandora_object->id}/print", array('attributes' => array('title' => 'Printer Friendly Version', 'id' => 'clip')));
+  $variables['image_clip'] = "";
+}
+
+/**
+ * Admin form for homepage thumbnails
+ */
+function manidora_homepage_thumbnail_admin($form, &$form_state){
+  $form = array();
+  $thumbnails = variable_get('manidora_thumbnail_pids',NULL);
+  $headers = array('pid' => 'PID', 'image' => 'Preview','opers' => 'Operations');
+  $options = array();
+  if (!is_null($thumbnails) && strlen(trim($thumbnails))>0){
+    $thumb_array = explode('~',$thumbnails);
+    foreach($thumb_array as $uupid){
+      $pid = urldecode($uupid);
+      $options[] = array('pid' => $pid, 'image' => '<img style="width:63px;height:63px;" src="' . url('islandora/object/' . $pid . '/datastream/TN/view') . '" alt="thumbnail for ' . $pid . '"/>', 'opers' => l('Remove','admin/islandora/manidora/homepage/' . $pid . '/remove'));
+    }
+  }
+    $form['manidora_homepage_thumbnails_add'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Enter the new pid here'),
+      '#description' => t('To add a new image to the homepage, add the pid here'),
+      '#length' => 30,
+      '#maxlength' => 255,
+      '#default_value' => '',
+    );
+    $form['manidora_homepage_thumbnails_add_btn'] = array(
+      '#type' => 'submit',
+      '#value' => 'Add',
+    );
+  
+  
+  $form['manidora_homepage_title'] = array(
+    '#markup' => '<p><b>'.t('Homepage images') .'</b></p>',
+  );
+  if (count($options)>0){
+    $form['manidora_homepage_thumbnails'] = array(
+      '#type' => 'tableselect',
+      '#title' => t('Homepage images'),
+      '#description' => t('Holds the pids to rotate on the homepage'),
+      '#multiple' => TRUE,
+      '#options' => $options,
+      '#empty' => t('There are no PIDs currently displayed on the homepage.'),
+      '#header' => $headers,
+    );
+  } else {
+    $form['manidora_homepage_thumbnails'] = array(
+      '#title' => t('Homepage images'),
+      '#description' => t('Holds the pids to rotate on the homepage'),
+      '#markup' => '<p>' . t('There are no images currently displayed on the homepage, add one below') . '</p>',
+    );
+  }
+
+  return $form;
+}
+
+/**
+ * Validate the PID entered to be added to the homepage
+ */
+function manidora_homepage_thumbnail_admin_validate($form, &$form_state){
+  $thumbnails = variable_get('manidora_thumbnail_pids');
+  $pids = array();
+  if (!is_null($thumbnails)){
+    $pids = explode('~',$thumbnails);
+  }
+  $newpid = $form_state['values']['manidora_homepage_thumbnails_add'];
+  if (strlen(trim($newpid)) > 0 && preg_match('/^\w+:\w+$/',$newpid)){
+    if (in_array(urlencode($newpid),$pids)){
+      form_error($form,t('This image is already included on the homepage'));
+    }
+    try {
+      $fedora_object = islandora_object_load($newpid);
+      if (!is_a($fedora_object,'IslandoraFedoraObject')){
+        form_error($form,t('Cannot load this PID, please ensure it is in the Fedora Repository.'));
+      } else {
+        $tn = $fedora_object->getDatastream('TN');
+        if (!$tn){
+          form_error($form,t('PID (' . $newpid . ') does not have a TN datastream.'));
+        }
+      }
+    } catch (Exception $e){
+      watchdog('Manidora','Homepage Thumbnail PID error (%e)',array('%e'=>$e->getMessage));
+      form_error($form,t('This PID seems invalid (' . $e->getMessage() . ')'));
+    }
+    
+  } else {
+    form_error($form,t('The PID must be of the correct format'));
+  }
+}
+/**
+ * Submit the Homepage Image addition
+ */
+function manidora_homepage_thumbnail_admin_submit($form, &$form_state){
+  $thumbnails = variable_get('manidora_thumbnail_pids',"");
+  if (strlen($thumbnails)>0){
+    $thumbnails .= '~';
+  }
+  $thumbnails .= urlencode($form_state['values']['manidora_homepage_thumbnails_add']);
+  variable_set('manidora_thumbnail_pids',$thumbnails);
+  drupal_set_message(t('PID added successfully'),'status',FALSE);
+}
+
+/**
+ * Remove PID from homepage collage
+ */
+function manidora_homepage_thumbnail_remove($pid = ""){
+  if (strlen($pid)>0){
+    $thumbnails = variable_get('manidora_thumbnail_pids',"");
+     if (strlen($thumbnails)>0){
+       $thumbs = explode('~',$thumbnails);
+       $newThumbs = array_filter($thumbs,create_function('$v','$pid = "' . $pid . '"; return ($v != urlencode($pid));'));
+       $thumbnails = implode('~',$newThumbs);
+     }
+     variable_set('manidora_thumbnail_pids',$thumbnails);
+     drupal_set_message(t('Image ' . $pid . ' removed'),'status',FALSE);
+  }
+  drupal_goto('admin/islandora/manidora/homepage');
+}
+
+/**
+ * Retrieves and renders PBCORE metadata.
+ *
+ * @param AbstractObject $object
+ *   An AbstractObject representing a Fedora object.
+ *
+ * @return string
+ *   The PBCORE metadata markup to be displayed.
+ */
+function manidora_pbcore_metadata($object) {
+  $pbcore_metadata = drupal_get_form('PBCORE Display', $object['PBCORE']->content);
+  return drupal_render($pbcore_metadata);
+}
+
+/**
+ * Implements hook_islandora_xml_form_builder_forms().
+ */
+function manidora_islandora_xml_form_builder_forms() {
+  $module_path = drupal_get_path('module', 'manidora');
+  return array(
+    'PBCORE Display' => array(
+      'form_file' => "$module_path/xml/forms/pbcore_display.xml",
+    ),
+  );
+}
+
+
+/**
+ * Implements hook_islandora_collection_search_form_alter()
+ * 
+ * We don't want the collection search to display on non-collection pages 
+ * as it is unreliable
+ */
+function manidora_form_islandora_collection_search_form_alter(&$form,&$form_state) {
+  $collection_pid = $form['simple']['collection_pid']['#value'];
+  if ($collection_pid && preg_match('/^\w+:[a-zA-Z0-9]+$/',$collection_pid)){
+    try {
+      $object = islandora_object_load($collection_pid);
+      $models = $object->relationships->get(FEDORA_MODEL_URI,'hasModel');      
+    } catch (Exception $e){
+      watchdog('Manidora', 'Failed to load object or models: %s',array('%s'=>$e->getMessage()));
+    }
+  }
+  if (isset($models)) {
+    $collection = FALSE;
+    foreach ($models as $model) {
+      if ($model['object']['value'] == 'islandora:collectionCModel' || $model['object']['value'] == 'islandora:newspaperCModel') {
+        $collection = TRUE;
+      }
+    }
+  }
+  if (isset($collection) && $collection === FALSE) {
+    $form['simple']['collection_select']['#default_value'] = 0;
+    $form['simple']['collection_select']['#access'] = 0;
+  }
+
+}
+
+/**
+ * Implements hook_islandora_datastream_alter.
+ */
+function manidora_islandora_datastream_alter($object, $datastream, &$context) {
+  if ($datastream->id == 'MODS') {
+    $context['params']['dsString'] = str_replace('<accessCondition type="Creative Commons License"/>', '', $context['params']['dsString']);
+  }
 }
